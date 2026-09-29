@@ -5,8 +5,16 @@ Pedal Gain Multi N v1.7.0 code base. Stereo in → stereo out; put it last in th
 just before Master. Buzz 1503 only, installed at `C:\Program Files (x86)\Jeskola\Buzz`.
 It is not intended for ReBuzz.
 
-**Status: v0.2.2 — engine and companion GUI.** The engine (v0.1) is verified in Buzz 1503.
-The GUI is new in v0.2 and not yet checked on a live install (see *Verify in Buzz 1503*).
+**Status: v0.3.0.** v0.2.2 (engine and GUI) is verified in Buzz 1503. v0.3 adds a
+level-matched A/B, a loudness-target assist, dither for the final render, and a steeper,
+wider-ranging Low Cut with an always-on DC blocker. These are tested in the sandbox and
+not yet checked live (see *Verify in Buzz 1503*).
+
+**Upgrading songs from v0.2:** the three new parameters are appended, so v0.2 songs load
+normally. Two things change in them:
+- **Low Cut** now spans 10–250 Hz, so a song saved with Low Cut switched on reopens at a
+  slightly different frequency.
+- **Slope** defaults to 24 dB/oct.
 
 ## GUI
 
@@ -16,6 +24,8 @@ patterns, undo and saving stay in step.
 
 - **Header:**
   - **METERS** opens the meter window.
+  - **MATCH** lights blue when engaged, and the header then shows what is being turned
+    down, for example *A/B matched: master −11.1 dB*.
   - **BYPASS** lights amber when engaged.
 - **Meters:**
   - Input L/R (sample peak) and output L/R (true peak), with a 3 s hold and clip lights.
@@ -23,7 +33,7 @@ patterns, undo and saving stay in step.
     deepest reduction.
   - A loudness line: **M**, **S**, **I**, **LRA** and correlation.
   - Click the meters to clear holds. Click the loudness line to restart I and LRA.
-- **Sections:** INPUT, EQ, STEREO, COMP and LIMITER.
+- **Sections:** INPUT, EQ (with Slope), STEREO, COMP, LIMITER and OUTPUT (Dither).
   - EQ, COMP and LIMITER have an **ON** switch, and their faders dim while the section is off.
   - Each fader shows the machine's own value text.
   - Drag to change the value from where you grab it (a click alone never moves it; Ctrl-drag is fine),
@@ -35,9 +45,17 @@ patterns, undo and saving stay in step.
     - **M** and **S** bars around the target.
     - **I** and its distance from the target.
     - **LRA** (EBU Tech 3342).
+    - **PLR**: max true peak minus I.
     - Max S and max M.
     - Correlation.
-  - **TARGET** cycles −23 / −16 / −14 LUFS; **RESET** restarts I, LRA and the maxima.
+  - **TARGET** cycles −23 / −16 / −14 LUFS.
+  - **RESET** restarts I, LRA, PLR and the maxima.
+  - **→ T** sets Lim Gain so I lands on the target. It measures from what you've played,
+    restarts the measurement after the change, and tells you what it did. With heavy
+    limiting the result can fall a little short, so press it again.
+  - The OUTPUT meters and all loudness values measure **the master**: after the limiter,
+    before Bypass, Match and Dither. Comparing sounds therefore never disturbs the
+    measurement.
   - It closes with its machine or the song.
 
 The panel and the window read separate meter slots, so neither takes peaks from the other.
@@ -46,16 +64,38 @@ Loudness integration runs from when each opens.
 ## Signal chain
 
 ```
-In → Input → EQ → Glue compressor → Stereo (Low Mono, Width) → True-peak limiter → Out
+In → DC blocker → Input → EQ → Glue compressor → Stereo (Low Mono, Width)
+   → True-peak limiter → [master meters] → Match / Bypass → Dither → Out
 ```
 
 Every section switches in and out with a 10 ms crossfade, and every level, frequency and
 gain glides (≈10 ms), so automation and switching don't click. **Bypass** crossfades to
 the dry input, delayed by the machine's latency, so A/B comparisons stay aligned.
 
+- **DC blocker:** a 5 Hz second-order high-pass at the input, always on. It is −0.02 dB at
+  20 Hz and only shifts phase slightly above that (see Tests).
+- **Match (level-matched A/B):**
+  - The machine keeps a running K-weighted loudness of the dry input and of the master
+    (2 s averaging, skipping silence below −70 LUFS).
+  - While Match is on, whichever of the two is louder is turned **down** to the other's
+    loudness, so switching Bypass compares sound, not level.
+  - Nothing is ever turned up, so matching can't push anything over 0 dBFS.
+  - The gains glide over about 100 ms.
+  - Switch Match off before rendering.
+- **Dither:** the very last stage, for when the render is written at 16 or 24 bits.
+  - **24-bit** and **16-bit** are TPDF (±1 LSB).
+  - **16-bit shaped** adds E-weighted 3-tap noise shaping, which puts the noise where the ear
+    is least sensitive: about 14 dB less noise below 4 kHz, more above 15 kHz.
+  - In Buzz units, 1.0 is exactly one 16-bit LSB.
+  - Leave Dither off unless this machine is the last thing before a 16- or 24-bit file,
+    and keep Master's volume at 0 dB so nothing changes the level after it.
+  - When the output is digital silence, Buzz receives silence (no dither noise).
+
 - **Input:** trim, −24 … +24 dB in 0.1 dB steps.
 - **EQ:**
-  - **Low Cut:** 12 dB/oct Butterworth, 20–250 Hz, or Off.
+  - **Low Cut:** 10–250 Hz or Off.
+    - **Slope:** 24 dB/oct (4th-order Butterworth, the default) or 12 dB/oct.
+    - Switching the slope crossfades.
   - **Low shelf:** 25–400 Hz.
   - **High shelf:** 1.25–20 kHz.
   - Filter frequencies are kept below 0.45 × the sample rate.
@@ -100,7 +140,7 @@ bypassed, and it is reported through `GetLatency()` for delay compensation.
 |---|---|---|---|
 | 0 | Input | −24 … +24 dB (0.1 dB) | 0 dB |
 | 1 | EQ | switch | On |
-| 2 | Low Cut | Off, 20–250 Hz | Off |
+| 2 | Low Cut | Off, 10–250 Hz | Off |
 | 3 | Low Freq | 25–400 Hz | 100 Hz |
 | 4 | Low Gain | ±12 dB (0.1 dB) | 0 dB |
 | 5 | High Freq | 1.25–20 kHz | 10 kHz |
@@ -121,9 +161,13 @@ bypassed, and it is reported through `GetLatency()` for delay compensation.
 | 20 | Ceiling | −6.0 … 0.0 dBTP (0.1 dB) | −1.0 dBTP |
 | 21 | Lim Release | 10–1000 ms | 100 ms |
 | 22 | Bypass | switch | Off |
+| 23 | Slope | 12, 24 dB/oct | 24 dB/oct |
+| 24 | Match | switch | Off |
+| 25 | Dither | Off, 24-bit, 16-bit, 16-bit shaped | Off |
 
-With the defaults, the machine is transparent (a delayed copy of the input, within
-float rounding) until the signal reaches the −1 dBTP ceiling.
+With the defaults, the machine is transparent until the signal reaches the −1 dBTP ceiling.
+The output is a delayed copy of the input apart from the DC blocker, which has a flat level
+response above 20 Hz and a small phase shift.
 
 ## Meter link (for the GUI)
 
@@ -131,7 +175,7 @@ The link works like Pedal Gain Multi N's: independent reader slots (0 = panel, 1
 windows), so readers never steal each other's peaks. The GUI sends `int32 1, int32 slot`
 through `SendGUIMessage`.
 
-The reply (protocol v1) is `int32 version, int32 sampleRate, int32 latency`, then these
+The reply (protocol v2) is `int32 version, int32 sampleRate, int32 latency`, then these
 floats:
 
 - input sample peak L/R
@@ -140,8 +184,9 @@ floats:
 - output mean square L/R
 - max compressor GR (dB)
 - max limiter GR (dB)
+- match (LU): master loudness minus dry loudness (new in v2)
 
-Then come `int32 B, int32 dropped` and B × 100 ms K-weighted output block energies, and
+The output values are measured on the master, before Bypass, Match and Dither. Then come `int32 B, int32 dropped` and B × 100 ms K-weighted output block energies, and
 finally the output correlation means LL, LR, RR. Reading a slot resets it.
 
 The GUI derives momentary, short-term, gated integrated loudness and **LRA** (EBU Tech
@@ -185,10 +230,14 @@ oversampled reference.
 
 | Check | Result |
 |---|---|
-| Transparency at defaults | delayed copy of input, error ≤ 0.0005 (−156 dBFS) |
+| Transparency at defaults | delayed copy of the input apart from the DC blocker's phase shift: residual −43 dB at 1 kHz, −33 dB at 331 Hz (phase only; level flat) |
+| DC blocker | −3.0 dB at 5 Hz, −0.26 dB at 10 Hz, −0.02 dB at 20 Hz; a 0.1 FS DC offset is removed completely |
+| Low Cut 30 Hz, 24 dB/oct | −49.3 / −24.4 / −3.1 / −0.02 dB at 7.5 / 15 / 30 / 60 Hz (12 dB/oct: −25.2 / −12.5 / −3.1 / −0.27) |
+| Match: +11.1 LU louder master; −8 LU quieter master | A/B difference 0.02 LU and 0.00 LU; nothing is ever raised |
+| Dither | output exactly on the 16-bit / 24-bit grid; 16-bit shaped: 14 dB less noise below 4 kHz than flat TPDF; a −90 dBFS sine keeps no measurable harmonics |
 | Bypass | delayed dry input |
 | Tilt ±6 | −3.0 / 0.0 / +3.0 dB at 20 Hz / 1 kHz / 20 kHz |
-| Shelves, low cut | RBJ-exact: +6 dB shelf reads +5.98 dB well below 100 Hz and +3.03 dB at 100 Hz; low cut −3.0 dB at its corner |
+| Shelves | RBJ-exact: +6 dB shelf reads +5.97 dB well below 100 Hz and +3.0 dB at 100 Hz |
 | Low Mono 120 Hz | side −48 dB at 30 Hz, −6 dB at 120 Hz, 0 dB at 1 kHz; mid 0.0 dB everywhere |
 | Width 0 / 200 | side −∞ / +6.02 dB |
 | Limiter, sines (1 k, fs/4, 0.4 fs) at up to 19 dB GR | ≤ −1.00 dBTP, except 0.4 fs at +0.26 dB |
@@ -202,19 +251,26 @@ oversampled reference.
 | Switching every section, sweeping every frequency | no clicks (Δ² ratio ≈ the level change) |
 | GUI loudness class (C#, run under Mono) on the machine's own blocks | EBU 3341 I: −22.99, −32.99, −23.01, −23.01, −22.98; EBU 3342 LRA: 10.0, 5.0, 20.0, 15.0 |
 | GUI | compiles cleanly against WPF / BuzzGUI stand-ins (layout and look need a live check) |
-| CPU | ≈3 % of one sandbox core with everything on (64-bit sandbox build) |
+| CPU | ≈3.4 % of one sandbox core with everything on, including Match and shaped dither (64-bit sandbox build) |
 
-## Verify in Buzz 1503 (v0.2.0)
+## Verify in Buzz 1503 (v0.3.0)
 
-1. **Panel:** it appears above the sliders and the parameter window widens to fit it.
-   Faders and switches follow the sliders both ways.
-2. **Meters:** IN, OUT, GR and the loudness line move. Clicking the meters clears the holds,
-   and clicking the loudness line restarts I and LRA.
-3. **Meter window:** METERS opens it, and pressing METERS again brings it to the front.
-   TARGET cycles and RESET works. The window closes when the machine is deleted or a new
-   song is loaded.
-4. **Parameter window text:** switches read On/Off, the shelves default to exactly 100 Hz
-   and 10.0 kHz, and Comp Mix reads 100%.
+1. **Match:**
+   - Set Lim Gain to about +10 dB and switch on MATCH. The header should show
+     *A/B matched: master −x dB* after a couple of seconds.
+   - Toggle BYPASS: both sides should sound equally loud.
+   - Switch MATCH off: the master returns to full level.
+2. **→ T:**
+   - Play the song for a while, choose a TARGET and press **→ T**.
+   - Lim Gain should move, and the message should say by how much.
+   - Play again: I should land within about 1 LU of the target, and pressing again
+     should close the gap.
+3. **Low Cut:** at 30 Hz, 24 dB/oct, the sub rumble goes but the kick keeps its weight.
+   Switching Slope doesn't click.
+4. **Dither:** render a WAV at 16 bits with Dither on 16-bit shaped. Fades should
+   end smoothly in low-level hiss rather than turning gritty.
+5. **Panel:** it shows the Slope row, the OUTPUT section and the MATCH button, and nothing
+   overlaps.
 
 ## License
 

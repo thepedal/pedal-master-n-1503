@@ -14,7 +14,9 @@
 //      → Out
 //
 //   Bypass crossfades to the dry input, delayed by the machine's latency so the
-//   A/B comparison stays sample-aligned.
+//   A/B comparison stays sample-aligned. Match (A/B) turns whichever of the two
+//   is louder down to the other's loudness, so the comparison is about sound,
+//   not level. Dither (TPDF, optional noise shaping) is the very last stage.
 //
 // Latency: the limiter's look-ahead (2 ms) plus the true-peak detector's
 // interpolation delay (15 samples). It is constant for a given sample rate —
@@ -22,6 +24,10 @@
 // hosts with delay compensation.
 //
 // v0.1.0 — first version (engine + meter link).
+// v0.3.0 — level-matched A/B (Match), dither for the final render, Low Cut
+//          10..250 Hz with a 12/24 dB/oct Slope, an always-on 5 Hz DC blocker,
+//          and the output meters/loudness measure the master before
+//          Bypass/Match/Dither (GUI protocol v2 adds the match gain).
 // v0.2.0 — companion GUI. Parameter window: switches read On/Off, Comp Mix reads
 //          plain %, and the shelf ranges are re-centred so their defaults land
 //          exactly on 100 Hz and 10 kHz (frequencies show 3 significant figures).
@@ -38,13 +44,13 @@
 
 static float const FULL_SCALE = 32768.0f;         // Buzz ±32768 → 1.0 = 0 dBFS
 static float const SMOOTH_SECONDS = 0.010f;       // parameter glides, ~10 ms
-static byte  const SAVE_VERSION = 1;
+static byte  const SAVE_VERSION = 2;
 
 static double const PI_D = 3.14159265358979323846;
 
 // ── Parameter encodings ────────────────────────────────────────────────────
 // Input      : word 0..480, 240 = 0 dB, 0.1 dB steps (-24 .. +24 dB)
-// Low Cut    : byte 0 = Off, 1..100 → 20..250 Hz (log), 12 dB/oct
+// Low Cut    : byte 0 = Off, 1..100 → 10..250 Hz (log); Slope 12 or 24 dB/oct
 // Low Freq   : byte 0..100 → 25..400 Hz (log), 50 = 100 Hz      Low shelf
 // Low Gain   : byte 0..240, 120 = 0 dB, 0.1 dB steps (±12 dB)
 // High Freq  : byte 0..100 → 1.25..20 kHz (log), 75 = 10 kHz   High shelf
@@ -62,6 +68,9 @@ static double const PI_D = 3.14159265358979323846;
 // Lim Gain   : word 0..240 → 0..+24 dB, 0.1 dB steps
 // Ceiling    : byte 0..60 → -6.0..0.0 dBTP, 0.1 dB steps
 // Lim Release: byte 0..100 → 10..1000 ms (log)
+// Slope      : byte 0..1 → 12, 24 dB/oct (Low Cut)              ┐ appended in v0.3 so
+// Match      : switch — level-matched A/B                       │ songs saved with
+// Dither     : byte 0..3 → Off, 24-bit, 16-bit, 16-bit shaped   ┘ v0.2 still load
 
 static float const RATIOS[6]      = { 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 10.0f };
 static float const ATTACKS_MS[6]  = { 0.1f, 0.3f, 1.0f, 3.0f, 10.0f, 30.0f };
@@ -75,7 +84,7 @@ static double LogMap(int v, int vmin, int vmax, double lo, double hi)
     return lo * pow(hi / lo, t);
 }
 
-static double LowCutHz   (int v) { return LogMap(v, 1, 100, 20.0, 250.0); }
+static double LowCutHz   (int v) { return LogMap(v, 1, 100, 10.0, 250.0); }
 static double LowShelfHz (int v) { return LogMap(v, 0, 100, 25.0, 400.0); }
 static double HighShelfHz(int v) { return LogMap(v, 0, 100, 1250.0, 20000.0); }
 static double LowMonoHz  (int v) { return LogMap(v, 1, 100, 40.0, 300.0); }
@@ -99,11 +108,14 @@ static inline float DbToLin(float db) { return powf(10.0f, db / 20.0f); }
 //           float outTpL,  outTpR,       // output true peak (4x)
 //           float outMsL,  outMsR,       // output mean square
 //           float compGrDb, limGrDb,     // max gain reduction (dB, >= 0)
+//           float matchDb,               // v2: master loudness minus input loudness (LU)
 //           int32 B, int32 dropped, float blockEnergy[B],  // output K-weighted 100 ms blocks
 //           float meanLL, meanLR, meanRR                   // output correlation sums
 // Every value covers the time since that slot was last read; reading resets it.
+// The output values measure the master: after the limiter, before Bypass, Match
+// and Dither, so loudness and the target assist don't move while comparing.
 static int const GUIMSG_GET_METERS = 1;
-static int const GUI_PROTOCOL      = 1;
+static int const GUI_PROTOCOL      = 2;
 static int const METER_SLOTS       = 4;
 static int const LOUD_BLOCK_CAP    = 64;
 
@@ -370,6 +382,7 @@ enum
     P_LOWMONO, P_WIDTH,
     P_LIMITER, P_LIMGAIN, P_CEILING, P_LIMREL,
     P_BYPASS,
+    P_SLOPE, P_MATCH, P_DITHER,             // v0.3 (appended)
     P_COUNT
 };
 
@@ -381,7 +394,7 @@ static CMachineParameter const pars[P_COUNT] =
 {
     WO("Input",       "Input trim, -24..+24 dB (240 = 0 dB, 0.1 dB steps)", 480, 240),
     SW("EQ",          "EQ section on/off", SWITCH_ON),
-    BY("Low Cut",     "Low cut 12 dB/oct: 0 = Off, 1..100 = 20..250 Hz", 100, 0),
+    BY("Low Cut",     "Low cut: 0 = Off, 1..100 = 10..250 Hz (slope: Slope)", 100, 0),
     BY("Low Freq",    "Low shelf frequency, 25..400 Hz (50 = 100 Hz)", 100, 50),
     BY("Low Gain",    "Low shelf gain, -12..+12 dB (120 = 0 dB)", 240, 120),
     BY("High Freq",   "High shelf frequency, 1.25..20 kHz (75 = 10 kHz)", 100, 75),
@@ -402,13 +415,17 @@ static CMachineParameter const pars[P_COUNT] =
     BY("Ceiling",     "Limiter ceiling, -6.0..0.0 dBTP (60 = 0 dBTP)", 60, 50),
     BY("Lim Release", "Limiter release, 10..1000 ms", 100, 50),
     SW("Bypass",      "Bypass (latency-compensated, click-free)", SWITCH_OFF),
+    BY("Slope",       "Low cut slope: 0 = 12 dB/oct, 1 = 24 dB/oct", 1, 1),
+    SW("Match",       "Level-matched A/B: the louder of master and dry is turned down to match", SWITCH_OFF),
+    BY("Dither",      "Final-render dither: Off, 24-bit, 16-bit, 16-bit shaped", 3, 0),
 };
 
 static CMachineParameter const *pParameters[P_COUNT] =
 {
     &pars[0],  &pars[1],  &pars[2],  &pars[3],  &pars[4],  &pars[5],  &pars[6],  &pars[7],
     &pars[8],  &pars[9],  &pars[10], &pars[11], &pars[12], &pars[13], &pars[14], &pars[15],
-    &pars[16], &pars[17], &pars[18], &pars[19], &pars[20], &pars[21], &pars[22]
+    &pars[16], &pars[17], &pars[18], &pars[19], &pars[20], &pars[21], &pars[22],
+    &pars[23], &pars[24], &pars[25]
 };
 
 #pragma pack(1)
@@ -422,9 +439,10 @@ struct gvals
     word limGain;
     byte ceiling, limRel;
     byte bypass;
+    byte slope, match, dither;
 };
 #pragma pack()
-static_assert(sizeof(gvals) == 25, "gvals must be packed and mirror pParameters");
+static_assert(sizeof(gvals) == 28, "gvals must be packed and mirror pParameters");
 
 CMachineInfo const MacInfo =
 {
@@ -446,8 +464,10 @@ CMachineInfo const MacInfo =
 static double const LOOKAHEAD_S = 0.002;
 static int const TP_DELAY = DET_HALF - 1;        // detector interval delay (see the limiter timing note)
 static int const RING     = 2048;                // delay rings (power of two)
-static int const MAX_LOOK = 1000;
-static int const EQ_STEP  = 16;                  // samples between filter redesigns while gliding                // look-ahead cap (192 kHz → 384)
+static int const MAX_LOOK = 1000;                // look-ahead cap (192 kHz → 384)
+static int const EQ_STEP  = 16;                  // samples between filter redesigns while gliding
+static double const MATCH_TAU = 2.0;             // loudness averaging for Match, seconds
+static double const MATCH_MAX_DB = 30.0;
 
 class mi;
 class miex : public CMachineInterfaceEx
@@ -478,6 +498,8 @@ private:
     void Configure(int sr);
     void UpdateEq(int n, bool snap);
     void Process(float *ps, int n);
+    void UpdateMatch(double eIn, double eOut);
+    bool anyAudible = false;
 
     gvals gval;
     miex  ex;
@@ -489,12 +511,14 @@ private:
     // Glided per-sample values.
     float gIn = 1, eqMix = 1, lcMix = 0, compOn = 0, makeup = 1, mix = 1;
     float lmMix = 0, width = 1, limOn = 1, limGain = 1, ceilLin = 1, bypass = 0;
+    float slopeMix = 1, gMaster = 1, gDry = 1;         // 24 dB/oct share; Match gains
     float kGlide = 1;
 
     // EQ (block-rate glide of the design values).
     double lcHz = 20, lsHz = 100, lsDb = 0, hsHz = 10000, hsDb = 0, tiltDb = 0;
     double lmHz = 120;
-    Svf    lowCut, lowShelf, highShelf;
+    Svf    lowCut, lowCut24a, lowCut24b, lowShelf, highShelf;   // lowCut = 12 dB/oct; 24a+24b = 24 dB/oct
+    Svf    dcBlock;                                             // 5 Hz, always on
     Biquad tilt;                                        // first order, fixed 1 kHz pivot
     Svf    lmLp1, lmLp2, lmHp1, lmHp2, lmSHp1, lmSHp2;   // Low Mono LR4 crossover
     int    scHpfSel = -1;
@@ -521,6 +545,15 @@ private:
     float  mh[2][16] = {}; int mhw = 0;
     Biquad kS, kH;  int kRate = 0, blockLen = 0, blockFill = 0; double blockSum = 0;
 
+    // Match: K-weighted loudness of the dry input vs the master, per 100 ms block.
+    Biquad kSi, kHi;  double inBlockSum = 0;
+    double avgIn = 0, avgOut = 0;
+    std::atomic<float> matchDb;
+
+    // Dither.
+    unsigned rng = 0x9E3779B9u;
+    float  dErr[2][3] = {};
+
     MeterAcc         meterAcc[METER_SLOTS];
     std::atomic_flag meterLock;
     void LockMeters()   { while (meterLock.test_and_set(std::memory_order_acquire)) {} }
@@ -534,6 +567,7 @@ mi::mi()
     AttrVals   = NULL;
     for (int i = 0; i < P_COUNT; i++) v[i] = pars[i].DefValue;
     latency.store(0);
+    matchDb.store(0.0f);
     meterLock.clear();
     for (int s = 0; s < METER_SLOTS; s++) meterAcc[s].Clear();
     InitTruePeakFilter();
@@ -586,9 +620,13 @@ void mi::Configure(int rate)
     hw = mhw = dw = 0; sampleIdx = 0;
 
     KShelf(sr, kS); KHighPass(sr, kH); kS.Reset(); kH.Reset();
+    KShelf(sr, kSi); KHighPass(sr, kHi); kSi.Reset(); kHi.Reset();
+    inBlockSum = 0; avgIn = avgOut = 0; matchDb.store(0.0f);
+    for (int c = 0; c < 2; c++) dErr[c][0] = dErr[c][1] = dErr[c][2] = 0.0f;
+    dcBlock.HighPass(sr, 5.0, 0.70710678); dcBlock.Apply(0); dcBlock.Reset();
     kRate = sr; blockLen = (sr + 5) / 10; blockFill = 0; blockSum = 0;
 
-    lowCut.Reset(); lowShelf.Reset(); highShelf.Reset(); tilt.Reset();
+    lowCut.Reset(); lowCut24a.Reset(); lowCut24b.Reset(); lowShelf.Reset(); highShelf.Reset(); tilt.Reset();
     lmLp1.Reset(); lmLp2.Reset(); lmHp1.Reset(); lmHp2.Reset(); lmSHp1.Reset(); lmSHp2.Reset();
     scHpf.Reset(); scHpfSel = -1;
     first = true;
@@ -630,7 +668,10 @@ void mi::UpdateEq(int n, bool snap)
     if (dirty)
     {
         double fmax = 0.45 * sr;                 // keep designs below Nyquist at low sample rates
-        lowCut.HighPass(sr, lcHz < fmax ? lcHz : fmax, 0.70710678);      lowCut.Apply(ramp);
+        double fc = lcHz < fmax ? lcHz : fmax;
+        lowCut.HighPass(sr, fc, 0.70710678);      lowCut.Apply(ramp);
+        lowCut24a.HighPass(sr, fc, 0.54119610);   lowCut24a.Apply(ramp);   // 4th-order Butterworth
+        lowCut24b.HighPass(sr, fc, 1.30656296);   lowCut24b.Apply(ramp);
         lowShelf.LowShelf(sr, lsHz < fmax ? lsHz : fmax, lsDb);           lowShelf.Apply(ramp);
         highShelf.HighShelf(sr, hsHz < fmax ? hsHz : fmax, hsDb);         highShelf.Apply(ramp);
         tilt.Tilt(sr, 1000.0, tiltDb);
@@ -686,9 +727,10 @@ bool mi::Work(float *psamples, int numsamples, int const mode)
     {
         int m = numsamples - done < MAX_BUFFER_LENGTH ? numsamples - done : MAX_BUFFER_LENGTH;
         Process(psamples + 2 * done, m);
+        if (anyAudible) audible = true;
     }
-    for (int s = 0; s < numsamples * 2; s++)
-        if (fabsf(psamples[s]) > 0.5f) { audible = true; break; }
+    // Silent unless the (pre-dither) output is audible: digital silence gets no dither noise.
+    // (anyAudible is set per block inside Process.)
 
 #ifdef PMN_HAVE_SSE
     _mm_setcsr(csr);
@@ -711,12 +753,24 @@ void mi::Process(float *ps, int n)
     float tLimG   = DbToLin(LimGainDb(v[P_LIMGAIN]));
     float tCeil   = FULL_SCALE * DbToLin(CeilingDb(v[P_CEILING]));
     float tByp    = v[P_BYPASS] ? 1.0f : 0.0f;
+    float tSlope  = v[P_SLOPE] ? 1.0f : 0.0f;
+
+    // Match: turn the louder of master and dry down to the other's loudness.
+    float mdb = v[P_MATCH] ? matchDb.load(std::memory_order_relaxed) : 0.0f;
+    float tGM = mdb > 0 ? DbToLin(-mdb) : 1.0f;
+    float tGD = mdb < 0 ? DbToLin(mdb)  : 1.0f;
+    float kMatch = 1.0f - expf(-1.0f / (0.1f * sr));      // 100 ms glide
+
+    int   dither = v[P_DITHER];
+    float qStep  = dither == 1 ? 1.0f / 256.0f : 1.0f;    // Buzz units: 1.0 = one 16-bit LSB
+    float qInv   = 1.0f / qStep;
 
     bool const snapEq = first;
     if (first)
     {
         gIn = tIn; eqMix = tEq; lcMix = tLc; compOn = tComp; makeup = tMakeup; mix = tMix;
         lmMix = tLm; width = tWidth; limOn = tLim; limGain = tLimG; ceilLin = tCeil; bypass = tByp;
+        slopeMix = tSlope; gMaster = tGM; gDry = tGD;
         first = false;
     }
 
@@ -744,6 +798,7 @@ void mi::Process(float *ps, int n)
     float  inPk[2] = { 0, 0 }, outTp[2] = { 0, 0 };
     double inSq[2] = { 0, 0 }, outSq[2] = { 0, 0 };
     float  maxCompGr = 0, minLimG = 1;
+    anyAudible = false;
     float  doneBlocks[4]; int nDone = 0;
     double cLL = 0, cLR = 0, cRR = 0;
     double const invFs = 1.0 / FULL_SCALE;
@@ -766,15 +821,28 @@ void mi::Process(float *ps, int n)
         compOn = Glide(compOn, tComp, k); makeup = Glide(makeup, tMakeup, k); mix = Glide(mix, tMix, k);
         lmMix = Glide(lmMix, tLm, k);    width = Glide(width, tWidth, k);
         limOn = Glide(limOn, tLim, k);   limGain = Glide(limGain, tLimG, k); ceilLin = Glide(ceilLin, tCeil, k);
-        bypass = Glide(bypass, tByp, k);
+        bypass = Glide(bypass, tByp, k);  slopeMix = Glide(slopeMix, tSlope, k);
+        gMaster = Glide(gMaster, tGM, kMatch); gDry = Glide(gDry, tGD, kMatch);
 
-        // ── Input trim ──
+        // ── Dry loudness for Match (K-weighted, per 100 ms block) ──
+        {
+            double nl = inL / FULL_SCALE, nr = inR / FULL_SCALE;
+            double kl = kHi.Run(0, kSi.Run(0, nl)), kr = kHi.Run(1, kSi.Run(1, nr));
+            inBlockSum += kl * kl + kr * kr;
+        }
+
+        // ── Input trim, DC blocker (5 Hz, 2nd order, always on) ──
         double xl = inL * gIn, xr = inR * gIn;
+        dcBlock.Run2(xl, xr);
 
         // ── EQ ──  (filters always run, so switching never starts from stale state)
         {
-            double hl = xl, hr = xr;
-            lowCut.Run2(hl, hr);
+            double hl = xl, hr = xr, ql = xl, qr = xr;
+            lowCut.Run2(hl, hr);                      // 12 dB/oct
+            lowCut24a.Run2(ql, qr);                   // 24 dB/oct
+            lowCut24b.Run2(ql, qr);
+            hl += (ql - hl) * slopeMix;
+            hr += (qr - hr) * slopeMix;
             double yl = xl + (hl - xl) * lcMix, yr = xr + (hr - xr) * lcMix;
             lowShelf.Run2(yl, yr);
             highShelf.Run2(yl, yr);
@@ -874,14 +942,7 @@ void mi::Process(float *ps, int n)
         orr = pdr + (orr - pdr) * limOn;
         if (limOn > 0.0f && G < minLimG) minLimG = G;
 
-        // ── Bypass (to the delayed dry input) ──
-        float rl = dRaw[0][rd], rr = dRaw[1][rd];
-        ol  += (rl - ol)  * bypass;
-        orr += (rr - orr) * bypass;
-
-        ps[2 * s] = ol; ps[2 * s + 1] = orr;
-
-        // ── Output metering ──
+        // ── Output metering: the master (before Bypass, Match and Dither) ──
         outSq[0] += (double)ol * ol;
         outSq[1] += (double)orr * orr;
         mhw = (mhw + 1) & 15;
@@ -896,9 +957,45 @@ void mi::Process(float *ps, int n)
         blockSum += kl * kl + kr * kr;
         if (++blockFill >= blockLen)
         {
-            if (nDone < 4) doneBlocks[nDone++] = (float)(blockSum / blockLen);
-            blockSum = 0; blockFill = 0;
+            double eOut = blockSum / blockLen, eIn = inBlockSum / blockLen;
+            if (nDone < 4) doneBlocks[nDone++] = (float)eOut;
+            UpdateMatch(eIn, eOut);
+            blockSum = 0; inBlockSum = 0; blockFill = 0;
         }
+
+        // ── Bypass (to the delayed dry input), level-matched when Match is on ──
+        float rl = dRaw[0][rd] * gDry, rr = dRaw[1][rd] * gDry;
+        ol  *= gMaster;
+        orr *= gMaster;
+        ol  += (rl - ol)  * bypass;
+        orr += (rr - orr) * bypass;
+
+        if (fabsf(ol) > 0.5f || fabsf(orr) > 0.5f) anyAudible = true;
+
+        // ── Dither (last): TPDF at the target word length, optionally noise-shaped ──
+        if (dither > 0)
+        {
+            float o[2] = { ol, orr };
+            for (int c = 0; c < 2; c++)
+            {
+                rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
+                float r1 = (rng & 0xFFFF) * (1.0f / 65536.0f), r2 = (rng >> 16) * (1.0f / 65536.0f);
+                float tpdf = (r1 - r2) * qStep;                     // triangular, ±1 LSB
+                float want = o[c];
+                if (dither == 3)                                     // E-weighted 3-tap error feedback
+                    want -= 1.623f * dErr[c][0] - 0.982f * dErr[c][1] + 0.109f * dErr[c][2];
+                float q = floorf((want + tpdf) * qInv + 0.5f) * qStep;
+                if (dither == 3)
+                {
+                    dErr[c][2] = dErr[c][1]; dErr[c][1] = dErr[c][0];
+                    dErr[c][0] = q - want;
+                }
+                o[c] = q;
+            }
+            ol = o[0]; orr = o[1];
+        }
+
+        ps[2 * s] = ol; ps[2 * s + 1] = orr;
     }
 
     float limGrDb = minLimG < 1.0f ? -20.0f * log10f(minLimG > 1e-6f ? minLimG : 1e-6f) : 0.0f;
@@ -927,6 +1024,21 @@ void mi::Process(float *ps, int n)
     UnlockMeters();
 }
 
+// Running K-weighted loudness of dry and master (100 ms blocks, τ = MATCH_TAU),
+// updated only while both are above -70 LUFS so silence doesn't skew it.
+void mi::UpdateMatch(double eIn, double eOut)
+{
+    double const gate = 1.17e-7;                        // -70 LUFS as block energy
+    if (eIn < gate || eOut < gate) return;
+    double a = 1.0 - exp(-0.1 / MATCH_TAU);
+    if (avgIn <= 0 || avgOut <= 0) { avgIn = eIn; avgOut = eOut; }
+    else { avgIn += (eIn - avgIn) * a; avgOut += (eOut - avgOut) * a; }
+    double d = 10.0 * log10(avgOut / avgIn);
+    if (d >  MATCH_MAX_DB) d =  MATCH_MAX_DB;
+    if (d < -MATCH_MAX_DB) d = -MATCH_MAX_DB;
+    matchDb.store((float)d, std::memory_order_relaxed);
+}
+
 char const *mi::DescribeValue(int const param, int const value)
 {
     static char const *ratios[]  = { "1.5:1", "2:1", "3:1", "4:1", "6:1", "10:1" };
@@ -949,8 +1061,11 @@ char const *mi::DescribeValue(int const param, int const value)
 
     switch (param)
     {
-    case P_EQ: case P_COMP: case P_LIMITER: case P_BYPASS:
+    case P_EQ: case P_COMP: case P_LIMITER: case P_BYPASS: case P_MATCH:
         return value ? "On" : "Off";
+    case P_SLOPE:    return value ? "24 dB/oct" : "12 dB/oct";
+    case P_DITHER:   { static char const *d[] = { "Off", "24-bit", "16-bit", "16-bit shaped" };
+                       return (value >= 0 && value < 4) ? d[value] : NULL; }
     case P_INPUT:    return db(InputDb(value), "dB");
     case P_LOWCUT:   return value <= 0 ? "Off" : hz(LowCutHz(value));
     case P_LOWFREQ:  return hz(LowShelfHz(value));
@@ -1002,6 +1117,7 @@ bool mi::HandleGUIMessage(CMachineDataOutput *pout, CMachineDataInput *pin)
     pout->Write((float)(a.outSq[0] * norm)); pout->Write((float)(a.outSq[1] * norm));
     pout->Write(a.compGr);
     pout->Write(a.limGr);
+    pout->Write(matchDb.load(std::memory_order_relaxed));
     pout->Write(a.nBlocks);
     pout->Write(a.dropped);
     for (int b = 0; b < a.nBlocks; b++) pout->Write(a.blocks[b]);

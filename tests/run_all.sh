@@ -10,4 +10,4 @@ g++ -O2 -std=c++17 -Wall -msse2 -I../native/sdk -o harness harness.cpp
 # loudness class as a runnable test program.
 mcs -target:library -out:/tmp/pmn_gui_check.dll cs/Stubs.cs ../gui/*.cs && echo "GUI compile check OK"
 mcs -out:/tmp/lt.exe ../gui/Loudness.cs cs/LoudnessTest.cs
-for t in t1 t2 t3 t4 t5 t5b t6 t7 t8 t9; do echo "── $t"; python3 $t.py; done
+for t in t1 t2 t3 t4 t5 t5b t6 t7 t8 t9 t10; do echo "── $t"; python3 $t.py; done

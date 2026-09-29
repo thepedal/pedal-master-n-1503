@@ -1,5 +1,7 @@
 // Pedal Master N — pieces shared by the parameter panel and the meter window:
 // the meter link to the native machine, the meter scale and the colours.
+// v0.3.0: protocol v2 (match gain); MATCH button and status; Slope and Dither
+//         rows; meter window "→ T" (Lim Gain to the loudness target) and PLR.
 // v0.2.1: panel faders drag relative to the grab point (no jump on click),
 //         "TP" marks the true-peak OUT rows, tighter spacing above the loudness line.
 
@@ -12,7 +14,9 @@ using BuzzGUI.Interfaces;
 namespace WDE.PedalMasterN
 {
     // ══════════════════════════════════════════════════════════════════════════
-    // MeterFrame / MeterLink — GUI message protocol v1 (see PedalMasterN.cpp).
+    // MeterFrame / MeterLink — GUI message protocol v2 (see PedalMasterN.cpp).
+// The output values measure the master: after the limiter, before Bypass,
+// Match and Dither.
     // Every value covers the time since that slot was last read.
     // ══════════════════════════════════════════════════════════════════════════
     public sealed class MeterFrame
@@ -21,6 +25,7 @@ namespace WDE.PedalMasterN
         public float InPkL, InPkR, InMsL, InMsR;       // input: sample peak, mean square (1.0 = 0 dBFS)
         public float OutTpL, OutTpR, OutMsL, OutMsR;   // output: true peak, mean square
         public float CompGr, LimGr;                    // max gain reduction, dB (>= 0)
+        public float MatchDb;                          // master loudness minus dry loudness, LU
         public readonly float[] Blocks = new float[1024];
         public int   BlockCount, Dropped;
         public float LL, LR, RR;                       // output correlation means
@@ -29,7 +34,7 @@ namespace WDE.PedalMasterN
     public sealed class MeterLink
     {
         const int GUIMSG_GET_METERS = 1;
-        const int GUI_PROTOCOL      = 1;
+        const int GUI_PROTOCOL      = 2;
 
         readonly byte[] request = new byte[8];
         public readonly MeterFrame Frame = new MeterFrame();
@@ -52,9 +57,9 @@ namespace WDE.PedalMasterN
 
         public static bool Parse(byte[] r, MeterFrame f)
         {
-            const int head = 12 + 10 * 4 + 8;           // 3 ints, 10 floats, B + dropped
+            const int head = 12 + 11 * 4 + 8;           // 3 ints, 11 floats, B + dropped
             if (r == null || r.Length < head || BitConverter.ToInt32(r, 0) != GUI_PROTOCOL) return false;
-            int b = BitConverter.ToInt32(r, 12 + 40);
+            int b = BitConverter.ToInt32(r, 12 + 44);
             if (b < 0 || b > f.Blocks.Length || r.Length < head + 4 * b + 12) return false;
 
             f.SampleRate = BitConverter.ToInt32(r, 4);
@@ -62,7 +67,7 @@ namespace WDE.PedalMasterN
             int o = 12;
             f.InPkL  = F(r, ref o); f.InPkR  = F(r, ref o); f.InMsL  = F(r, ref o); f.InMsR  = F(r, ref o);
             f.OutTpL = F(r, ref o); f.OutTpR = F(r, ref o); f.OutMsL = F(r, ref o); f.OutMsR = F(r, ref o);
-            f.CompGr = F(r, ref o); f.LimGr  = F(r, ref o);
+            f.CompGr = F(r, ref o); f.LimGr  = F(r, ref o); f.MatchDb = F(r, ref o);
             f.BlockCount = BitConverter.ToInt32(r, o); o += 4;
             f.Dropped    = BitConverter.ToInt32(r, o); o += 4;
             for (int i = 0; i < b; i++) f.Blocks[i] = F(r, ref o);
@@ -200,6 +205,7 @@ namespace WDE.PedalMasterN
         public static readonly Brush OnBg       = B(60, 170, 110);    // section switched on
         public static readonly Brush OnFg       = B(20, 20, 25);
         public static readonly Brush BypassBg   = B(235, 185, 40);    // bypass engaged
+        public static readonly Brush MatchBg    = B(80, 170, 220);    // level-matched A/B engaged
         public static readonly Brush HeadroomTint = A(34, 235, 60, 45);
         public static readonly Brush Under      = B(70, 140, 210);
         public static readonly Brush Over       = B(235, 170, 50);

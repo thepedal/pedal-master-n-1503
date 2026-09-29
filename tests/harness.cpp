@@ -37,9 +37,9 @@ int main(int argc, char **argv)
         if ((i / blk) % (int)(0.033 * sr / blk + 1) == 0 || i + blk >= frames) {
             In rq; int id = 1, slot = 1; rq.b.resize(8); memcpy(&rq.b[0], &id, 4); memcpy(&rq.b[4], &slot, 4);
             Out o; m.HandleGUIMessage(&o, &rq);
-            In r; r.b = o.b; int ver, rate, lat, B, dr; float fv[10];
-            r.Read(ver); r.Read(rate); r.Read(lat); for (int k = 0; k < 10; k++) r.Read(fv[k]); r.Read(B); r.Read(dr);
-            fprintf(fm, "R %d %d %d %d", i, ver, rate, lat); for (int k = 0; k < 10; k++) fprintf(fm, " %.9g", fv[k]);
+            In r; r.b = o.b; int ver, rate, lat, B, dr; float fv[11];
+            r.Read(ver); r.Read(rate); r.Read(lat); for (int k = 0; k < 11; k++) r.Read(fv[k]); r.Read(B); r.Read(dr);
+            fprintf(fm, "R %d %d %d %d", i, ver, rate, lat); for (int k = 0; k < 11; k++) fprintf(fm, " %.9g", fv[k]);
             fprintf(fm, " %d %d", B, dr);
             for (int k = 0; k < B; k++) { float e; r.Read(e); fprintf(fm, " b%.9g", e); }
             float c3[3]; for (int k = 0; k < 3; k++) { r.Read(c3[k]); fprintf(fm, " c%.9g", c3[k]); }

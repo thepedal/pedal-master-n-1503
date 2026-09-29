@@ -3,7 +3,7 @@
 // Buzz loads "Pedal Master N.GUI.dll" from the gear folder next to the native
 // machine and shows this panel at the top of the parameter window.
 //
-//   ┌ PEDAL MASTER N ───────────────────────────── [METERS] [BYPASS] ┐
+//   ┌ PEDAL MASTER N  A/B matched: master −11.1 dB  [METERS][MATCH][BYPASS] ┐
 //   │ IN   L ███████████████░░░░░░░░░░░░░░░   -8.1                   │
 //   │      R ██████████████░░░░░░░░░░░░░░░░   -8.4                   │
 //   │ OUT  L ████████████████████░░░░░░░░░░   -1.0   (true peak)     │
@@ -12,7 +12,7 @@
 //   │ M -13.9  S -14.2  I -14.1 LUFS  LRA 5.2 LU  C +0.84            │
 //   │ INPUT          │ COMP  [ON]                                     │
 //   │ EQ  [ON]       │ LIMITER [ON]                                   │
-//   │ STEREO         │                                                │
+//   │ STEREO         │ OUTPUT (Dither)                                │
 //   └──────────────────────────────────────────────────────────────────┘
 //
 // Every control is bound to a machine parameter and writes through
@@ -53,6 +53,8 @@ namespace WDE.PedalMasterN
         readonly System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
         double lastTick;
         bool discardNext = true;
+        TextBlock matchStatus;
+        string shownStatus;
 
         public IMachine Machine
         {
@@ -70,16 +72,31 @@ namespace WDE.PedalMasterN
                                     "Bypass", Theme.BypassBg, 62);
             DockPanel.SetDock(bypass, Dock.Right);
             header.Children.Add(bypass);
-            var metersBtn = MakeButton("METERS", "Open the large meter window (loudness, LRA, correlation)",
+            var match = MakeSwitch("MATCH",
+                "Level-matched A/B: the louder of master and dry is turned down to the other's loudness,\n" +
+                "so BYPASS compares sound, not level. Switch it off again before rendering.",
+                "Match", Theme.MatchBg, 54);
+            match.Margin = new Thickness(0, 0, 6, 0);
+            DockPanel.SetDock(match, Dock.Right);
+            header.Children.Add(match);
+            var metersBtn = MakeButton("METERS", "Open the large meter window (loudness, LRA, PLR, correlation, target assist)",
                                        () => MeterWindow.ShowFor(imachine), 62);
             metersBtn.Margin = new Thickness(0, 0, 6, 0);
             DockPanel.SetDock(metersBtn, Dock.Right);
             header.Children.Add(metersBtn);
-            header.Children.Add(new TextBlock
+            var title = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            title.Children.Add(new TextBlock
             {
                 Text = "PEDAL MASTER N", FontFamily = Theme.MonoFamily, FontSize = 11, FontWeight = FontWeights.Bold,
                 Foreground = Theme.Heading, VerticalAlignment = VerticalAlignment.Center
             });
+            matchStatus = new TextBlock
+            {
+                FontFamily = Theme.MonoFamily, FontSize = 10, Foreground = Theme.MatchBg,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0)
+            };
+            title.Children.Add(matchStatus);
+            header.Children.Add(title);
             root.Children.Add(header);
 
             // ── Meters + loudness line ──
@@ -98,6 +115,7 @@ namespace WDE.PedalMasterN
             Section(left, "EQ", "EQ", new[]
             {
                 Row("Low Cut",   "Low Cut",   false, 2),
+                Row("Slope",     "Slope",     false, 1),
                 Row("Low Freq",  "Low Freq",  false, 2),
                 Row("Low Gain",  "Low Gain",  true,  5),
                 Row("High Freq", "High Freq", false, 2),
@@ -125,6 +143,7 @@ namespace WDE.PedalMasterN
                 Row("Ceiling", "Ceiling",     false, 1),
                 Row("Release", "Lim Release", false, 2),
             });
+            Section(right, "OUTPUT", null, new[] { Row("Dither", "Dither", false, 1) });
 
             Content = new Border
             {
@@ -286,12 +305,25 @@ namespace WDE.PedalMasterN
             foreach (var a in refreshers) a();
             foreach (var r in rows) r.Refresh();
 
-            if (link.Poll(imachine))
+            bool ok = link.Poll(imachine);
+            UpdateMatchStatus(ok ? link.Frame.MatchDb : float.NaN);
+            if (ok)
             {
                 if (discardNext) { discardNext = false; return; }
                 meters.Feed(link.Frame, dt);
             }
             else meters.Feed(null, dt);
+        }
+
+        // "A/B matched: master −11.1 dB" while MATCH is on.
+        void UpdateMatchStatus(float matchDb)
+        {
+            string text = "";
+            if (IsOn("Match") && !float.IsNaN(matchDb))
+                text = Math.Abs(matchDb) < 0.05f ? "A/B matched: equal loudness"
+                     : "A/B matched: " + (matchDb > 0 ? "master " : "dry ") +
+                       (-Math.Abs(matchDb)).ToString("F1", CultureInfo.InvariantCulture) + " dB";
+            if (text != shownStatus) { matchStatus.Text = text; shownStatus = text; }
         }
     }
 
@@ -447,7 +479,8 @@ namespace WDE.PedalMasterN
         {
             Height = TotalH;
             Cursor = Cursors.Hand;
-            ToolTip = "Gain reduction bars run 0 to 24 dB (ticks at 3, 6, 12 dB)\n" +
+            ToolTip = "OUT and the loudness line measure the master: after the limiter, before Bypass, Match and Dither\n" +
+                      "Gain reduction bars run 0 to 24 dB (ticks at 3, 6, 12 dB)\n" +
                       "Click the meters to clear peak holds and clip lights · click the loudness line to restart I and LRA";
         }
 

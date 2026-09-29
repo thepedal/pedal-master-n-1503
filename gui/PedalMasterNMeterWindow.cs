@@ -11,8 +11,10 @@
 //
 //   Loudness strip: M and S bars on an LU scale around the target,
 //   I (EBU R128 gated) with its distance from the target, LRA (EBU Tech 3342),
-//   max short-term, and the output correlation. TARGET cycles
-//   -23 (broadcast) / -16 / -14 (streaming) LUFS; RESET restarts I and LRA.
+//   PLR (max true peak − I), max short-term/momentary, and the output
+//   correlation. TARGET cycles -23 (broadcast) / -16 / -14 (streaming) LUFS;
+//   RESET restarts I, LRA and PLR; "→ T" sets Lim Gain to land I on the target.
+//   All output values measure the master (before Bypass, Match and Dither).
 //
 // Closes with its machine or when the song changes. Redraws on
 // CompositionTarget.Rendering (≈ 60 fps) and always unsubscribes on close.
@@ -64,7 +66,7 @@ namespace WDE.PedalMasterN
             this.machine = machine;
             Title         = MachineName() + " — Meters";
             Width         = 400;
-            Height        = 520;
+            Height        = 540;
             MinWidth      = 330;
             MinHeight     = 380;
             ShowInTaskbar = false;
@@ -84,7 +86,7 @@ namespace WDE.PedalMasterN
             bar.Children.Add(MakeButton("CLEAR", "Clear all peak holds and clip lights", () => bridge.ResetAll()));
             bar.Children.Add(new TextBlock
             {
-                Text = "solid = RMS (300 ms)\ntranslucent = peak\noutput = true peak",
+                Text = "solid = RMS (300 ms), translucent = peak\noutput = the master, true peak\n(before Bypass, Match and Dither)",
                 Foreground = Theme.Dim, FontFamily = Theme.MonoFamily, FontSize = 9, LineHeight = 11,
                 VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0)
             });
@@ -100,15 +102,23 @@ namespace WDE.PedalMasterN
                 });
             targetText = (TextBlock)targetBtn.Child;
             loudness.TargetChanged = () => targetText.Text = TargetLabel(loudness.Target);
-            var resetBtn = MakeButton("RESET", "Restart the integrated loudness (I), LRA and max short-term",
-                                      () => { loudness.Meter.Reset(); loudness.InvalidateVisual(); });
+            var resetBtn = MakeButton("RESET", "Restart the integrated loudness (I), LRA, PLR and the maxima",
+                                      () => { loudness.Meter.Reset(); loudness.ResetPeak(); loudness.InvalidateVisual(); });
             resetBtn.Margin = new Thickness(0, 6, 0, 0);
+
+            var toTarget = MakeButton("→ T",
+                "Set the limiter's Gain so the integrated loudness (I) lands on the target.\n" +
+                "Play the song (or a representative part) first. The measurement restarts after the change;\n" +
+                "play it again to check. Heavy limiting can keep it a little under the target: press again.",
+                SetGainToTarget);
+            toTarget.Margin = new Thickness(0, 6, 0, 0);
 
             var loudButtons = new StackPanel { Margin = new Thickness(8, 8, 4, 8), Width = 62 };
             loudButtons.Children.Add(targetBtn);
             loudButtons.Children.Add(resetBtn);
+            loudButtons.Children.Add(toTarget);
 
-            var strip = new DockPanel { Height = 112, Background = Theme.Panel };
+            var strip = new DockPanel { Height = 124, Background = Theme.Panel };
             DockPanel.SetDock(loudButtons, Dock.Left);
             strip.Children.Add(loudButtons);
             strip.Children.Add(loudness);
@@ -146,6 +156,47 @@ namespace WDE.PedalMasterN
                 }
                 catch { }
             };
+        }
+
+        // "→ T": move Lim Gain by (target − I). The limiter holds the peaks, so the
+        // loudness follows the gain almost 1:1 until it limits hard.
+        void SetGainToTarget()
+        {
+            double I = loudness.Meter.Integrated;
+            if (double.IsNaN(I)) { loudness.Flash("Play some music first: no integrated loudness yet"); return; }
+
+            IParameter gain = null, limiter = null;
+            try
+            {
+                foreach (var g in machine.ParameterGroups)
+                    if (g?.Parameters != null && g.Type == ParameterGroupType.Global)
+                        foreach (var p in g.Parameters)
+                        {
+                            if (p?.Name == "Lim Gain") gain = p;
+                            if (p?.Name == "Limiter")  limiter = p;
+                        }
+            }
+            catch { }
+            if (gain == null) return;
+            if (limiter != null && limiter.GetValue(0) == 0)
+            {
+                loudness.Flash("The limiter is off: switch it on first (it keeps the peaks under the ceiling)");
+                return;
+            }
+
+            double delta = loudness.Target - I;
+            int cur = gain.GetValue(0);
+            int want = cur + (int)Math.Round(delta * 10.0);          // Lim Gain: 0.1 dB steps
+            int set = Math.Max(gain.MinValue, Math.Min(gain.MaxValue, want));
+            if (set != cur) gain.SetValue(0, set);
+            loudness.Meter.Reset();
+            loudness.ResetPeak();
+
+            string now = "Lim Gain " + (set / 10.0).ToString("+0.0;-0.0", CultureInfo.InvariantCulture) + " dB";
+            loudness.Flash(set != want
+                ? now + " (at its limit): lower the target or add gain elsewhere"
+                : now + " (" + delta.ToString("+0.0;-0.0", CultureInfo.InvariantCulture) + "): play again to check");
+            loudness.InvalidateVisual();
         }
 
         static string TargetLabel(double t) => "T " + t.ToString("F0", CultureInfo.InvariantCulture);
@@ -206,6 +257,7 @@ namespace WDE.PedalMasterN
             var f = link.Frame;
             bridge.Feed(f, dt);
             for (int i = 0; i < f.BlockCount; i++) loudness.Meter.Add(f.Blocks[i]);
+            loudness.AddTruePeak(Math.Max(f.OutTpL, f.OutTpR));
             loudness.UpdateCorrelation(f.LL, f.LR, f.RR, dt);
             loudness.InvalidateVisual();
         }
@@ -432,6 +484,15 @@ namespace WDE.PedalMasterN
             set { target = value; TargetChanged?.Invoke(); }
         }
 
+        // Max true peak since reset (linear, 1.0 = 0 dBTP) → PLR = peak − I.
+        double maxTp;
+        public void AddTruePeak(float tp) { if (tp > maxTp) maxTp = tp; }
+        public void ResetPeak() { maxTp = 0; }
+
+        // One-line message under the strip for a few seconds (target assist).
+        string flash; DateTime flashUntil;
+        public void Flash(string text) { flash = text; flashUntil = DateTime.UtcNow.AddSeconds(6); InvalidateVisual(); }
+
         const double CORR_TAU = 0.300;
         double mLL, mLR, mRR;
         public double Correlation = double.NaN;
@@ -482,7 +543,9 @@ namespace WDE.PedalMasterN
             string lra = "LRA " + (double.IsNaN(Meter.Range) ? "--" : Meter.Range.ToString("F1", CultureInfo.InvariantCulture)) + " LU";
             var lt = Theme.Text(this, lra, 11, Theme.TextBrush, bold: true);
             dc.DrawText(lt, new Point(x0, yR));
-            dc.DrawText(Theme.Text(this, "max S " + Theme.F1(Meter.MaxShortTerm) + "  max M " + Theme.F1(Meter.MaxMomentary), 9, Theme.Dim),
+            double plr = maxTp > 1e-6 && !double.IsNaN(Meter.Integrated) ? 20 * Math.Log10(maxTp) - Meter.Integrated : double.NaN;
+            dc.DrawText(Theme.Text(this, "PLR " + (double.IsNaN(plr) ? "--" : plr.ToString("F1", CultureInfo.InvariantCulture)) +
+                                         "  max S " + Theme.F1(Meter.MaxShortTerm) + "  max M " + Theme.F1(Meter.MaxMomentary), 9, Theme.Dim),
                         new Point(x0 + lt.Width + 12, yR + 2));
 
             // Correlation −1 … +1.
@@ -501,6 +564,9 @@ namespace WDE.PedalMasterN
                                 : (Correlation >= 0 ? "+" : "") + Correlation.ToString("F2", CultureInfo.InvariantCulture),
                                 10, Theme.TextBrush, bold: true);
             dc.DrawText(cv, new Point(W - valueW, yC - 1));
+
+            if (flash != null && DateTime.UtcNow < flashUntil)
+                dc.DrawText(Theme.Text(this, flash, 9, Theme.Amber), new Point(4, yC + rowH + 12));
         }
 
         void Bar(DrawingContext dc, string label, double lufs, double y, double h,
