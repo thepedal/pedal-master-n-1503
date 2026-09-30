@@ -5,10 +5,15 @@ Pedal Gain Multi N v1.7.0 code base. Stereo in → stereo out; put it last in th
 just before Master. Buzz 1503 only, installed at `C:\Program Files (x86)\Jeskola\Buzz`.
 It is not intended for ReBuzz.
 
-**Status: v0.3.0.** v0.2.2 (engine and GUI) is verified in Buzz 1503. v0.3 adds a
-level-matched A/B, a loudness-target assist, dither for the final render, and a steeper,
-wider-ranging Low Cut with an always-on DC blocker. These are tested in the sandbox and
-not yet checked live (see *Verify in Buzz 1503*).
+**Status: v0.3.1.** v0.3.0 is verified live in Buzz 1503, including Match, → T, the Low
+Cut changes and both 16-bit dither modes. v0.3.1 changes only the native machine:
+- **Dither clamp:** the dithered output is clamped to the 16/24-bit range, so Ceiling
+  0.0 dBTP plus dither can no longer reach +32768.
+- **Speed:** CPU use is roughly halved. The true-peak interpolators use mirrored
+  histories with SSE dot products and skip the trivial phase 0, and the compressor's
+  gain maths is skipped while it is off.
+- **Output unchanged:** it is identical to v0.3.0 apart from float rounding, below
+  −125 dBFS.
 
 **Upgrading songs from v0.2:** the three new parameters are appended, so v0.2 songs load
 normally. Two things change in them:
@@ -251,7 +256,9 @@ oversampled reference.
 | Switching every section, sweeping every frequency | no clicks (Δ² ratio ≈ the level change) |
 | GUI loudness class (C#, run under Mono) on the machine's own blocks | EBU 3341 I: −22.99, −32.99, −23.01, −23.01, −22.98; EBU 3342 LRA: 10.0, 5.0, 20.0, 15.0 |
 | GUI | compiles cleanly against WPF / BuzzGUI stand-ins (layout and look need a live check) |
-| CPU | ≈3.4 % of one sandbox core with everything on, including Match and shaped dither (64-bit sandbox build) |
+| v0.3.1 against v0.3.0, 7 scenarios, including switching the limiter and compressor mid-song | identical output apart from float rounding (at most 0.012 of a 16-bit step, −129 dBFS) |
+| Dither clamp, output driven to 1.2 × full scale | 16-bit: +32767 / −32768; 24-bit: +32767.996 / −32768 |
+| CPU (64-bit sandbox build, file I/O included) | v0.3.1: 1.3 % of one core at defaults, 1.8 % with everything on (v0.3.0: 3.3 % and 3.6 %) |
 
 ## Verify in Buzz 1503 (v0.3.0)
 

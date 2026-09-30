@@ -24,13 +24,18 @@
 // hosts with delay compensation.
 //
 // v0.1.0 — first version (engine + meter link).
+// v0.2.0 — companion GUI. Parameter window: switches read On/Off, Comp Mix reads
+//          plain %, and the shelf ranges are re-centred so their defaults land
+//          exactly on 100 Hz and 10 kHz (frequencies show 3 significant figures).
 // v0.3.0 — level-matched A/B (Match), dither for the final render, Low Cut
 //          10..250 Hz with a 12/24 dB/oct Slope, an always-on 5 Hz DC blocker,
 //          and the output meters/loudness measure the master before
 //          Bypass/Match/Dither (GUI protocol v2 adds the match gain).
-// v0.2.0 — companion GUI. Parameter window: switches read On/Off, Comp Mix reads
-//          plain %, and the shelf ranges are re-centred so their defaults land
-//          exactly on 100 Hz and 10 kHz (frequencies show 3 significant figures).
+// v0.3.1 — dither output clamped to the 16/24-bit range (Ceiling 0.0 dBTP + dither
+//          could reach +32768). Speed: the true-peak interpolators use mirrored
+//          histories and SSE dot products and skip the trivial phase 0; the
+//          compressor's gain maths is skipped while it is fully off. Output is
+//          unchanged (differences at float rounding, below -125 dBFS).
 
 #include <math.h>
 #include <stdio.h>
@@ -147,23 +152,6 @@ static void InitTruePeakFilter()
     done = true;
 }
 
-// Peak of the 4x-interpolated signal over the interval [age 6, age 5) of a
-// 16-entry circular history h (w = index of the newest sample).
-static inline float IntervalPeak(float const *h, int w)
-{
-    float peak = 0.0f;
-    for (int ph = 0; ph < TP_PHASES; ph++)
-    {
-        float const *c = g_tpCoef[ph];
-        float y = 0.0f;
-        for (int j = 0; j < TP_TAPS; j++)
-            y += c[j] * h[(w - j) & 15];
-        float a = fabsf(y);
-        if (a > peak) peak = a;
-    }
-    return peak;
-}
-
 // ── Limiter detector interpolator ─────────────────────────────────────────
 // Stricter than the meter: DET_PHASES x oversampling with a Kaiser-windowed
 // sinc of DET_TAPS taps, accurate much closer to Nyquist, so broadband material
@@ -210,22 +198,67 @@ static void InitDetectorFilter()
     done = true;
 }
 
-// Peak of the interpolated signal over the interval [age DET_HALF, age DET_HALF-1)
-// of a 64-entry circular history h (w = index of the newest sample).
-static inline float DetectorPeak(float const *h, int w)
+// ── Interpolated peak search (shared by the limiter detector and the meter) ──
+// Each channel keeps a mirrored history: every sample is written twice, T apart,
+// so the last T samples are always contiguous (oldest first). The coefficients
+// are stored reversed to match, and each phase is one contiguous dot product
+// (SSE: four multiplies at a time). Phase 0 falls exactly on a sample, so its
+// value is that sample: no arithmetic needed.
+template <int T> struct Mirror
 {
-    float peak = 0.0f;
-    for (int ph = 0; ph < DET_PHASES; ph++)
+    float b[2][2 * T];
+    int   pos = 0;
+    void Reset() { for (int c = 0; c < 2; c++) for (int i = 0; i < 2 * T; i++) b[c][i] = 0.0f; pos = 0; }
+    inline void Push(float l, float r)
     {
-        float const *c = g_detCoef[ph];
-        float y = 0.0f;
-        for (int j = 0; j < DET_TAPS; j++)
-            y += c[j] * h[(w - j) & 63];
-        float a = fabsf(y);
+        pos = pos + 1 == T ? 0 : pos + 1;
+        b[0][pos] = b[0][pos + T] = l;
+        b[1][pos] = b[1][pos + T] = r;
+    }
+    inline float const *Win(int c) const { return b[c] + pos + 1; }   // [0] oldest … [T-1] newest
+};
+
+template <int T> static inline float Dot(float const *a, float const *w)
+{
+#ifdef PMN_HAVE_SSE
+    __m128 acc = _mm_setzero_ps();
+    for (int k = 0; k < T; k += 4)
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_loadu_ps(a + k), _mm_loadu_ps(w + k)));
+    __m128 hi = _mm_movehl_ps(acc, acc);
+    acc = _mm_add_ps(acc, hi);
+    acc = _mm_add_ss(acc, _mm_shuffle_ps(acc, acc, 1));
+    return _mm_cvtss_f32(acc);
+#else
+    float y = 0.0f;
+    for (int k = 0; k < T; k++) y += a[k] * w[k];
+    return y;
+#endif
+}
+
+// Peak over the interval [age H, age H-1) of one channel's window: phase 0 is the
+// sample at age H itself, phases 1..P-1 are interpolated.
+template <int T, int P> static inline float WindowPeak(float const *w, float const (*rc)[T], int H)
+{
+    float peak = fabsf(w[T - 1 - H]);
+    for (int ph = 1; ph < P; ph++)
+    {
+        float a = fabsf(Dot<T>(rc[ph], w));
         if (a > peak) peak = a;
     }
     return peak;
 }
+
+static float g_tpRev[TP_PHASES][TP_TAPS];      // meter coefficients, reversed for Mirror windows
+static float g_detRev[DET_PHASES][DET_TAPS];   // detector coefficients, reversed
+
+static void InitReversed()
+{
+    for (int ph = 0; ph < TP_PHASES; ph++)
+        for (int k = 0; k < TP_TAPS; k++) g_tpRev[ph][k] = g_tpCoef[ph][TP_TAPS - 1 - k];
+    for (int ph = 0; ph < DET_PHASES; ph++)
+        for (int k = 0; k < DET_TAPS; k++) g_detRev[ph][k] = g_detCoef[ph][DET_TAPS - 1 - k];
+}
+static_assert(TP_TAPS % 4 == 0 && DET_TAPS % 4 == 0, "interpolator lengths must be multiples of 4");
 
 // ── Biquad (double precision, transposed direct form II, 2 channels) ──────
 struct Biquad
@@ -530,8 +563,7 @@ private:
 
     // Limiter.
     int    look = 96;                   // look-ahead, samples
-    float  hist[2][64] = {};            // detector history
-    int    hw = 0;
+    Mirror<DET_TAPS> hist;              // detector history
     float  prevPk = 0;
     float  dq_val[RING]; int dq_idx[RING]; int dqHead = 0, dqTail = 0;  // monotonic min deque
     float  box[RING];  double boxSum = 0; int boxPos = 0;
@@ -542,7 +574,7 @@ private:
     float  limRelK = 0;
 
     // Output metering.
-    float  mh[2][16] = {}; int mhw = 0;
+    Mirror<TP_TAPS> mh;                 // output true-peak meter history
     Biquad kS, kH;  int kRate = 0, blockLen = 0, blockFill = 0; double blockSum = 0;
 
     // Match: K-weighted loudness of the dry input vs the master, per 100 ms block.
@@ -572,6 +604,7 @@ mi::mi()
     for (int s = 0; s < METER_SLOTS; s++) meterAcc[s].Clear();
     InitTruePeakFilter();
     InitDetectorFilter();
+    InitReversed();
 }
 
 void mi::Init(CMachineDataInput * const pi)
@@ -611,13 +644,11 @@ void mi::Configure(int rate)
 
     for (int c = 0; c < 2; c++)
     {
-        for (int j = 0; j < 64; j++) hist[c][j] = 0.0f;
-        for (int j = 0; j < 16; j++) mh[c][j] = 0.0f;
         for (int j = 0; j < RING; j++) dPre[c][j] = dLim[c][j] = dRaw[c][j] = 0.0f;
     }
     for (int j = 0; j < RING; j++) box[j] = 1.0f;
     boxSum = look; boxPos = 0; dqHead = dqTail = 0; relState = 1; prevPk = 0;
-    hw = mhw = dw = 0; sampleIdx = 0;
+    hist.Reset(); mh.Reset(); dw = 0; sampleIdx = 0;
 
     KShelf(sr, kS); KHighPass(sr, kH); kS.Reset(); kH.Reset();
     KShelf(sr, kSi); KHighPass(sr, kHi); kSi.Reset(); kHi.Reset();
@@ -853,6 +884,8 @@ void mi::Process(float *ps, int n)
         }
 
         // ── Glue compressor (feed-forward, log domain, stereo-linked) ──
+        // The detector always runs, so switching the compressor on lands straight
+        // on its settled gain reduction; only the gain maths is skipped while off.
         {
             double sl = xl, sr2 = xr;
             if (useSc) { sl = scHpf.Run(0, xl); sr2 = scHpf.Run(1, xr); }
@@ -874,12 +907,15 @@ void mi::Process(float *ps, int n)
                 grSlow += (gr - grSlow) * (gr > grSlow ? aSlowAtt : aSlowRel);
                 if (grSlow > grTot) grTot = grSlow;
             }
-            float gc   = DbToLin(-grTot);
-            float eff  = makeup * (1.0f - mix + mix * gc);
-            float g    = 1.0f + (eff - 1.0f) * compOn;
-            xl *= g; xr *= g;
-            float shown = grTot * compOn * mix;
-            if (shown > maxCompGr) maxCompGr = shown;
+            if (compOn > 0.0f || tComp > 0.0f)       // fully off = exactly unity gain
+            {
+                float gc   = DbToLin(-grTot);
+                float eff  = makeup * (1.0f - mix + mix * gc);
+                float g    = 1.0f + (eff - 1.0f) * compOn;
+                xl *= g; xr *= g;
+                float shown = grTot * compOn * mix;
+                if (shown > maxCompGr) maxCompGr = shown;
+            }
         }
 
         // ── Stereo: Low Mono (LR4 on the side channel) and Width ──
@@ -902,9 +938,11 @@ void mi::Process(float *ps, int n)
         //   so the latency is look - 1 + H.
         float pl = (float)xl, pr = (float)xr;
         float gl = pl * limGain, gr2 = pr * limGain;
-        hw = (hw + 1) & 63;
-        hist[0][hw] = gl; hist[1][hw] = gr2;
-        float ipk = DetectorPeak(hist[0], hw), ipk2 = DetectorPeak(hist[1], hw);
+        // The detector runs even while the limiter is off, so switching it on lands
+        // on a settled gain envelope instead of letting the first peaks through.
+        hist.Push(gl, gr2);
+        float ipk  = WindowPeak<DET_TAPS, DET_PHASES>(hist.Win(0), g_detRev, DET_HALF);
+        float ipk2 = WindowPeak<DET_TAPS, DET_PHASES>(hist.Win(1), g_detRev, DET_HALF);
         if (ipk2 > ipk) ipk = ipk2;
         float need = ipk > prevPk ? ipk : prevPk;
         prevPk = ipk;
@@ -945,9 +983,9 @@ void mi::Process(float *ps, int n)
         // ── Output metering: the master (before Bypass, Match and Dither) ──
         outSq[0] += (double)ol * ol;
         outSq[1] += (double)orr * orr;
-        mhw = (mhw + 1) & 15;
-        mh[0][mhw] = ol; mh[1][mhw] = orr;
-        float t0 = IntervalPeak(mh[0], mhw), t1 = IntervalPeak(mh[1], mhw);
+        mh.Push(ol, orr);
+        float t0 = WindowPeak<TP_TAPS, TP_PHASES>(mh.Win(0), g_tpRev, TP_TAPS / 2);
+        float t1 = WindowPeak<TP_TAPS, TP_PHASES>(mh.Win(1), g_tpRev, TP_TAPS / 2);
         if (t0 > outTp[0]) outTp[0] = t0;
         if (t1 > outTp[1]) outTp[1] = t1;
 
@@ -988,8 +1026,10 @@ void mi::Process(float *ps, int n)
                 if (dither == 3)
                 {
                     dErr[c][2] = dErr[c][1]; dErr[c][1] = dErr[c][0];
-                    dErr[c][0] = q - want;
+                    dErr[c][0] = q - want;                   // shaping error from the unclamped value
                 }
+                float hi = FULL_SCALE - qStep;                   // 16-bit: +32767, 24-bit: +32767.996
+                if (q > hi) q = hi; else if (q < -FULL_SCALE) q = -FULL_SCALE;
                 o[c] = q;
             }
             ol = o[0]; orr = o[1];

@@ -42,3 +42,12 @@ for dv,name in ((2,'16-bit'),(3,'16-bit shaped'),(1,'24-bit')):
     fund=band(990,1010); noise=band(20,20000)-10*np.log10(1)  # includes fundamental bin; small
     print(f'dither {name:14s}: on grid (max off {ongrid:.1e}), -90 dBFS sine kept at {10*np.log10(np.mean((y*np.sqrt(2)/FS)**2)):.1f} dB (incl. noise);'
           f' noise 100-900 Hz + 1.1-4 kHz {10*np.log10(10**(band(100,900)/10)+10**(band(1100,4000)/10)):.1f} dB, 15-20k Hz {band(15000,20000):.1f} dB, 3rd harmonic {band(2990,3010):.1f} dB')
+
+# v0.3.1: dither never exceeds the 16/24-bit range. Drive the output past full scale
+# (limiter off, a 1.2 FS sine) so the clamp is certainly exercised.
+big=np.sin(2*np.pi*50*np.arange(2*sr)/sr)*FS*1.2
+for dv,name,hi in ((0,'off',None),(2,'16-bit',32767.0),(3,'16-bit shaped',32767.0),(1,'24-bit',32768-1/256)):
+    Lo,Ro,_,_=run(big,big,sr,DITHER=dv,LIMITER=0)
+    mx,mn=max(Lo.max(),Ro.max()),min(Lo.min(),Ro.min())
+    verdict='(no dither: float output, not clamped)' if hi is None else ('OK' if mx<=hi and mn>=-32768 else 'OVER')
+    print(f'dither {name:14s} on a 1.2 FS sine: max {mx:10.4f}, min {mn:10.1f}  {verdict}')
