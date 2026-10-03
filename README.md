@@ -1,4 +1,5 @@
 # Pedal Master N
+<img width="395" height="698" alt="master-n" src="https://github.com/user-attachments/assets/5644cd60-0886-4fdf-9333-d4f4c4cdb37a" />
 
 Native C++ **mastering machine** for **Jeskola Buzz build 1503 (32-bit)**, built on the
 Pedal Gain Multi N v1.7.0 code base. Stereo in → stereo out; put it last in the chain,
