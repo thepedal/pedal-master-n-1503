@@ -6,15 +6,18 @@ Pedal Gain Multi N v1.7.0 code base. Stereo in → stereo out; put it last in th
 just before Master. Buzz 1503 only, installed at `C:\Program Files (x86)\Jeskola\Buzz`.
 It is not intended for ReBuzz.
 
-**Status: v0.3.1.** v0.3.0 is verified live in Buzz 1503, including Match, → T, the Low
-Cut changes and both 16-bit dither modes. v0.3.1 changes only the native machine:
-- **Dither clamp:** the dithered output is clamped to the 16/24-bit range, so Ceiling
-  0.0 dBTP plus dither can no longer reach +32768.
-- **Speed:** CPU use is roughly halved. The true-peak interpolators use mirrored
-  histories with SSE dot products and skip the trivial phase 0, and the compressor's
-  gain maths is skipped while it is off.
-- **Output unchanged:** it is identical to v0.3.0 apart from float rounding, below
-  −125 dBFS.
+**Status: v0.4.0.** v0.3.x is verified live in Buzz 1503. v0.4.0 adds a vintage-style
+low end to the EQ, tested in the sandbox and not yet checked live (see *Verify in Buzz
+1503*):
+- **Low Dip** (Off to 6 dB) cuts a broad band at three times the Low Freq. Combined with
+  a Low Gain boost, it gives the classic passive-EQ "boost and attenuate" curve: deeper
+  bass with less low-mid mud.
+- **Low Shape** switches the low shelf between **Clean** (as before) and **Vintage**, a
+  resonant corner with a small bump below it and a small dip just above.
+
+**Upgrading songs from v0.3:** the two new parameters are appended, and at their defaults
+(Low Dip Off, Low Shape Clean) the output is identical to v0.3.1, sample for sample. v0.3
+songs therefore sound exactly as before.
 
 **Upgrading songs from v0.2:** the three new parameters are appended, so v0.2 songs load
 normally. Two things change in them:
@@ -39,7 +42,8 @@ patterns, undo and saving stay in step.
     deepest reduction.
   - A loudness line: **M**, **S**, **I**, **LRA** and correlation.
   - Click the meters to clear holds. Click the loudness line to restart I and LRA.
-- **Sections:** INPUT, EQ (with Slope), STEREO, COMP, LIMITER and OUTPUT (Dither).
+- **Sections:** INPUT, EQ (with Slope, Low Dip and Low Shape), STEREO, COMP, LIMITER and
+  OUTPUT (Dither).
   - EQ, COMP and LIMITER have an **ON** switch, and their faders dim while the section is off.
   - Each fader shows the machine's own value text.
   - Drag to change the value from where you grab it (a click alone never moves it; Ctrl-drag is fine),
@@ -103,6 +107,14 @@ the dry input, delayed by the machine's latency, so A/B comparisons stay aligned
     - **Slope:** 24 dB/oct (4th-order Butterworth, the default) or 12 dB/oct.
     - Switching the slope crossfades.
   - **Low shelf:** 25–400 Hz.
+    - **Low Shape:** **Clean** is a Q 0.707 shelf with no overshoot. **Vintage** raises the
+      corner's Q to 1.2: at +6 dB that gives about +0.8 dB of bump below the corner and
+      about −0.9 dB just above it, like a passive network. Switching morphs smoothly.
+  - **Low Dip:** a broad bell cut (Q 0.9), 0–6 dB, centred at **3 × Low Freq** so it
+    follows the shelf (Low Freq 60 Hz → dip at 180 Hz). Combined with a low-shelf boost,
+    it lifts the deep bass and cleans up the low mids, for example Low Freq 57 Hz,
+    +6 dB Vintage and Low Dip 4 dB: +6.7 dB at 30 Hz and −4.4 dB at 180 Hz. It is unity
+    when Off, and switches off with the EQ.
   - **High shelf:** 1.25–20 kHz.
   - Filter frequencies are kept below 0.45 × the sample rate.
   - Both shelves are ±12 dB with slope S = 1.
@@ -170,6 +182,8 @@ bypassed, and it is reported through `GetLatency()` for delay compensation.
 | 23 | Slope | 12, 24 dB/oct | 24 dB/oct |
 | 24 | Match | switch | Off |
 | 25 | Dither | Off, 24-bit, 16-bit, 16-bit shaped | Off |
+| 26 | Low Dip | Off, 0.1–6.0 dB (0.1 dB), at 3 × Low Freq | Off |
+| 27 | Low Shape | Clean, Vintage | Clean |
 
 With the defaults, the machine is transparent until the signal reaches the −1 dBTP ceiling.
 The output is a delayed copy of the input apart from the DC blocker, which has a flat level
@@ -244,6 +258,9 @@ oversampled reference.
 | Bypass | delayed dry input |
 | Tilt ±6 | −3.0 / 0.0 / +3.0 dB at 20 Hz / 1 kHz / 20 kHz |
 | Shelves | RBJ-exact: +6 dB shelf reads +5.97 dB well below 100 Hz and +3.0 dB at 100 Hz |
+| Low Dip, Vintage shape and the two together, 44.1 and 48 kHz | match the filter design within 0.017 dB (the remainder is the DC blocker at 20 Hz); the dip centre follows Low Freq exactly (100 Hz → 300 Hz) |
+| v0.4.0 against v0.3.1, 9 scenarios including EQ settings and sweeps | identical output, sample for sample |
+| Switching Low Shape, Low Dip Off → 6 dB, sweeping Low Freq with the dip on | no clicks |
 | Low Mono 120 Hz | side −48 dB at 30 Hz, −6 dB at 120 Hz, 0 dB at 1 kHz; mid 0.0 dB everywhere |
 | Width 0 / 200 | side −∞ / +6.02 dB |
 | Limiter, sines (1 k, fs/4, 0.4 fs) at up to 19 dB GR | ≤ −1.00 dBTP, except 0.4 fs at +0.26 dB |
@@ -259,26 +276,21 @@ oversampled reference.
 | GUI | compiles cleanly against WPF / BuzzGUI stand-ins (layout and look need a live check) |
 | v0.3.1 against v0.3.0, 7 scenarios, including switching the limiter and compressor mid-song | identical output apart from float rounding (at most 0.012 of a 16-bit step, −129 dBFS) |
 | Dither clamp, output driven to 1.2 × full scale | 16-bit: +32767 / −32768; 24-bit: +32767.996 / −32768 |
-| CPU (64-bit sandbox build, file I/O included) | v0.3.1: 1.3 % of one core at defaults, 1.8 % with everything on (v0.3.0: 3.3 % and 3.6 %) |
+| CPU (64-bit sandbox build, file I/O included) | about 1.3–1.7 % of one core at defaults and 1.8–2.3 % with everything on (v0.3.0: 3.3 % and 3.6 %); v0.4.0 adds about 0.1 % |
 
-## Verify in Buzz 1503 (v0.3.0)
+## Verify in Buzz 1503 (v0.4.0)
 
-1. **Match:**
-   - Set Lim Gain to about +10 dB and switch on MATCH. The header should show
-     *A/B matched: master −x dB* after a couple of seconds.
-   - Toggle BYPASS: both sides should sound equally loud.
-   - Switch MATCH off: the master returns to full level.
-2. **→ T:**
-   - Play the song for a while, choose a TARGET and press **→ T**.
-   - Lim Gain should move, and the message should say by how much.
-   - Play again: I should land within about 1 LU of the target, and pressing again
-     should close the gap.
-3. **Low Cut:** at 30 Hz, 24 dB/oct, the sub rumble goes but the kick keeps its weight.
-   Switching Slope doesn't click.
-4. **Dither:** render a WAV at 16 bits with Dither on 16-bit shaped. Fades should
-   end smoothly in low-level hiss rather than turning gritty.
-5. **Panel:** it shows the Slope row, the OUTPUT section and the MATCH button, and nothing
-   overlaps.
+1. **Panel:** the EQ section shows **Low Dip** (reading Off) and **Low Shape** (reading
+   Clean) under Low Gain, and nothing overlaps.
+2. **Old songs:** a song saved with v0.3 sounds exactly as before.
+3. **Low Dip:** with music playing and Low Freq at 60 Hz, raise Low Dip to about 4 dB.
+   The low mids thin out, around 180 Hz, without losing the bass. Then add Low Gain
+   +4 to +6 dB: the bass gets bigger without getting boomy.
+4. **Low Shape:** with a Low Gain boost, switch between Clean and Vintage. Vintage sounds
+   slightly rounder and tighter, and switching doesn't click.
+
+v0.3.0 was verified live: Match, → T, the Low Cut changes and both 16-bit dither modes,
+including the noise-shaping spectrum measured in a real render.
 
 ## License
 

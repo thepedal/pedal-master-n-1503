@@ -118,6 +118,8 @@ namespace WDE.PedalMasterN
                 Row("Slope",     "Slope",     false, 1),
                 Row("Low Freq",  "Low Freq",  false, 2),
                 Row("Low Gain",  "Low Gain",  true,  5),
+                Row("Low Dip",   "Low Dip",   false, 5),
+                Row("Low Shape", "Low Shape", false, 1),
                 Row("High Freq", "High Freq", false, 2),
                 Row("High Gain", "High Gain", true,  5),
                 Row("Tilt",      "Tilt",      true,  5),

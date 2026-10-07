@@ -1,5 +1,6 @@
 // Pedal Master N — pieces shared by the parameter panel and the meter window:
 // the meter link to the native machine, the meter scale and the colours.
+// v0.4.0: Low Dip and Low Shape rows in the EQ section (protocol unchanged).
 // v0.3.0: protocol v2 (match gain); MATCH button and status; Slope and Dither
 //         rows; meter window "→ T" (Lim Gain to the loudness target) and PLR.
 // v0.2.1: panel faders drag relative to the grab point (no jump on click),

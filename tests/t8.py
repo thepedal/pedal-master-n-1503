@@ -7,6 +7,8 @@ def click(changes,**kw):
 cases={'Bypass on':[(24000,'BYPASS',1)],'Limiter off (at 6 dB GR)':[(24000,'LIMITER',0)],'EQ off (low +12 dB)':[(24000,'EQ',0)],
        'Comp on (10 dB GR)':[(24000,'COMP',1)],'Low Mono on 300 Hz':[(24000,'LOWMONO',100)],'Width 100→200':[(24000,'WIDTH',200)],
        'Low gain 0→+12 dB':[(24000,'LOWGAIN',240)],'Input 0→+12 dB':[(24000,'INPUT',360)],'Low cut on 250 Hz':[(24000,'LOWCUT',100)],
-       'Slope 24→12 (low cut 250 Hz)':[(24000,'SLOPE',0)],'Match on (limiting +12)':[(24000,'MATCH',1)]}
-extra={'Slope 24→12 (low cut 250 Hz)':dict(LOWCUT=100),'Match on (limiting +12)':dict(LIMGAIN=120),'Limiter off (at 6 dB GR)':dict(LIMGAIN=180),'EQ off (low +12 dB)':dict(LOWGAIN=240,LIMITER=0),'Comp on (10 dB GR)':dict(THRESH=20,RATIO=5,LIMITER=0)}
-for k,c in cases.items(): print(f'{k:28s} max |Δ²| after change / steady = {click(c,**extra.get(k,{})):.2f}')
+       'Slope 24→12 (low cut 250 Hz)':[(24000,'SLOPE',0)],'Match on (limiting +12)':[(24000,'MATCH',1)],
+       'Low Shape Clean→Vintage (+12 dB)':[(24000,'LOWSHAPE',1)],'Low Dip Off→6 dB':[(24000,'LOWDIP',60)],
+       'Low Freq 25→400 Hz, Dip 6 on':[(24000,'LOWFREQ',100)]}
+extra={'Low Shape Clean→Vintage (+12 dB)':dict(LOWGAIN=240,LIMITER=0),'Low Dip Off→6 dB':dict(LIMITER=0),'Low Freq 25→400 Hz, Dip 6 on':dict(LOWDIP=60,LOWFREQ=0,LIMITER=0),'Slope 24→12 (low cut 250 Hz)':dict(LOWCUT=100),'Match on (limiting +12)':dict(LIMGAIN=120),'Limiter off (at 6 dB GR)':dict(LIMGAIN=180),'EQ off (low +12 dB)':dict(LOWGAIN=240,LIMITER=0),'Comp on (10 dB GR)':dict(THRESH=20,RATIO=5,LIMITER=0)}
+for k,c in cases.items(): print(f'{k:34s} max |Δ²| after change / steady = {click(c,**extra.get(k,{})):.2f}')

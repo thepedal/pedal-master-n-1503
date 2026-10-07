@@ -36,6 +36,12 @@
 //          histories and SSE dot products and skip the trivial phase 0; the
 //          compressor's gain maths is skipped while it is fully off. Output is
 //          unchanged (differences at float rounding, below -125 dBFS).
+// v0.4.0 — vintage-style low end: Low Dip (0..6 dB) cuts a broad band at 3× the
+//          Low Freq, so a low-shelf boost plus Low Dip gives the classic passive-EQ
+//          "boost and attenuate" curve (deeper bass, less low-mid mud); Low Shape
+//          Vintage gives the low shelf a resonant corner (about +0.8 dB of bump
+//          below it and -0.9 dB just above at +6 dB). Both appended; at their
+//          defaults (Low Dip Off, Low Shape Clean) the output is identical to v0.3.1.
 
 #include <math.h>
 #include <stdio.h>
@@ -76,6 +82,8 @@ static double const PI_D = 3.14159265358979323846;
 // Slope      : byte 0..1 → 12, 24 dB/oct (Low Cut)              ┐ appended in v0.3 so
 // Match      : switch — level-matched A/B                       │ songs saved with
 // Dither     : byte 0..3 → Off, 24-bit, 16-bit, 16-bit shaped   ┘ v0.2 still load
+// Low Dip    : byte 0..60 → Off, 0.1..6.0 dB cut at 3× Low Freq ┐ appended in v0.4
+// Low Shape  : byte 0..1 → Clean, Vintage                       ┘
 
 static float const RATIOS[6]      = { 1.5f, 2.0f, 3.0f, 4.0f, 6.0f, 10.0f };
 static float const ATTACKS_MS[6]  = { 0.1f, 0.3f, 1.0f, 3.0f, 10.0f, 30.0f };
@@ -96,6 +104,13 @@ static double LowMonoHz  (int v) { return LogMap(v, 1, 100, 40.0, 300.0); }
 static double LimRelMs   (int v) { return LogMap(v, 0, 100, 10.0, 1000.0); }
 
 static float InputDb   (int v) { return (v - 240) * 0.1f; }
+static float DipDb     (int v) { return v * 0.1f; }
+
+// Vintage-style low end.
+static double const DIP_RATIO   = 3.0;           // dip centre = 3 × Low Freq
+static double const DIP_Q       = 0.9;           // broad, like a passive network
+static double const SHELF_K_CLEAN   = 1.4142135623730951;   // sqrt(2): Q 0.707, no overshoot
+static double const SHELF_K_VINTAGE = 1.0 / 1.2;            // Q 1.2: resonant corner
 static float ShelfDb   (int v) { return (v - 120) * 0.1f; }
 static float TiltDb    (int v) { return (v - 60)  * 0.1f; }
 static float ThreshDb  (int v) { return -40.0f + v * 0.5f; }
@@ -331,10 +346,18 @@ struct Svf
     }
     void LowPass (double fs, double f, double q) { Core(tan(PI_D * f / fs), 1 / q, 0, 0, 1); }
     void HighPass(double fs, double f, double q) { double k = 1 / q; Core(tan(PI_D * f / fs), k, 1, -k, -1); }
-    void LowShelf(double fs, double f, double db)                 // Q = 0.7071 (slope S = 1)
+    // k = 1/Q of the shelf corner: sqrt(2) = Q 0.707 (slope S = 1, no overshoot);
+    // smaller k = a resonant corner (a bump on the boosted side, a dip just past it).
+    void LowShelf(double fs, double f, double db, double k = 1.4142135623730951)
     {
-        double A = pow(10.0, db / 40.0), k = sqrt(2.0);
+        double A = pow(10.0, db / 40.0);
         Core(tan(PI_D * f / fs) / sqrt(A), k, 1, k * (A - 1), A * A - 1);
+    }
+    // Peaking bell, constant-Q style (as the RBJ peaking EQ). 0 dB = exact unity.
+    void Bell(double fs, double f, double db, double q)
+    {
+        double A = pow(10.0, db / 40.0), k = 1.0 / (q * A);
+        Core(tan(PI_D * f / fs), k, 1, k * (A * A - 1), 0);
     }
     void HighShelf(double fs, double f, double db)
     {
@@ -416,6 +439,7 @@ enum
     P_LIMITER, P_LIMGAIN, P_CEILING, P_LIMREL,
     P_BYPASS,
     P_SLOPE, P_MATCH, P_DITHER,             // v0.3 (appended)
+    P_LOWDIP, P_LOWSHAPE,                   // v0.4 (appended)
     P_COUNT
 };
 
@@ -451,6 +475,8 @@ static CMachineParameter const pars[P_COUNT] =
     BY("Slope",       "Low cut slope: 0 = 12 dB/oct, 1 = 24 dB/oct", 1, 1),
     SW("Match",       "Level-matched A/B: the louder of master and dry is turned down to match", SWITCH_OFF),
     BY("Dither",      "Final-render dither: Off, 24-bit, 16-bit, 16-bit shaped", 3, 0),
+    BY("Low Dip",     "Broad cut at 3x Low Freq, 0 = Off .. 6.0 dB; with a Low Gain boost = vintage boost-and-attenuate", 60, 0),
+    BY("Low Shape",   "Low shelf corner: 0 = Clean, 1 = Vintage (resonant)", 1, 0),
 };
 
 static CMachineParameter const *pParameters[P_COUNT] =
@@ -458,7 +484,7 @@ static CMachineParameter const *pParameters[P_COUNT] =
     &pars[0],  &pars[1],  &pars[2],  &pars[3],  &pars[4],  &pars[5],  &pars[6],  &pars[7],
     &pars[8],  &pars[9],  &pars[10], &pars[11], &pars[12], &pars[13], &pars[14], &pars[15],
     &pars[16], &pars[17], &pars[18], &pars[19], &pars[20], &pars[21], &pars[22],
-    &pars[23], &pars[24], &pars[25]
+    &pars[23], &pars[24], &pars[25], &pars[26], &pars[27]
 };
 
 #pragma pack(1)
@@ -473,9 +499,10 @@ struct gvals
     byte ceiling, limRel;
     byte bypass;
     byte slope, match, dither;
+    byte lowDip, lowShape;
 };
 #pragma pack()
-static_assert(sizeof(gvals) == 28, "gvals must be packed and mirror pParameters");
+static_assert(sizeof(gvals) == 30, "gvals must be packed and mirror pParameters");
 
 CMachineInfo const MacInfo =
 {
@@ -549,9 +576,11 @@ private:
 
     // EQ (block-rate glide of the design values).
     double lcHz = 20, lsHz = 100, lsDb = 0, hsHz = 10000, hsDb = 0, tiltDb = 0;
+    double lsK = SHELF_K_CLEAN, dipDb = 0;             // v0.4: shelf corner, dip depth (<= 0)
     double lmHz = 120;
     Svf    lowCut, lowCut24a, lowCut24b, lowShelf, highShelf;   // lowCut = 12 dB/oct; 24a+24b = 24 dB/oct
     Svf    dcBlock;                                             // 5 Hz, always on
+    Svf    lowDip;                                              // v0.4: bell at 3 × Low Freq
     Biquad tilt;                                        // first order, fixed 1 kHz pivot
     Svf    lmLp1, lmLp2, lmHp1, lmHp2, lmSHp1, lmSHp2;   // Low Mono LR4 crossover
     int    scHpfSel = -1;
@@ -658,6 +687,7 @@ void mi::Configure(int rate)
     kRate = sr; blockLen = (sr + 5) / 10; blockFill = 0; blockSum = 0;
 
     lowCut.Reset(); lowCut24a.Reset(); lowCut24b.Reset(); lowShelf.Reset(); highShelf.Reset(); tilt.Reset();
+    lowDip.Reset();
     lmLp1.Reset(); lmLp2.Reset(); lmHp1.Reset(); lmHp2.Reset(); lmSHp1.Reset(); lmSHp2.Reset();
     scHpf.Reset(); scHpfSel = -1;
     first = true;
@@ -695,6 +725,8 @@ void mi::UpdateEq(int n, bool snap)
     dirty |= glideLog(hsHz, HighShelfHz(v[P_HIGHFREQ]));
     dirty |= glideLin(hsDb, ShelfDb(v[P_HIGHGAIN]));
     dirty |= glideLin(tiltDb, TiltDb(v[P_TILT]));
+    dirty |= glideLin(lsK, v[P_LOWSHAPE] ? SHELF_K_VINTAGE : SHELF_K_CLEAN);   // Clean ↔ Vintage morphs
+    dirty |= glideLin(dipDb, -DipDb(v[P_LOWDIP]));
     int ramp = snap ? 0 : n;               // coefficients move linearly across the step
     if (dirty)
     {
@@ -703,7 +735,9 @@ void mi::UpdateEq(int n, bool snap)
         lowCut.HighPass(sr, fc, 0.70710678);      lowCut.Apply(ramp);
         lowCut24a.HighPass(sr, fc, 0.54119610);   lowCut24a.Apply(ramp);   // 4th-order Butterworth
         lowCut24b.HighPass(sr, fc, 1.30656296);   lowCut24b.Apply(ramp);
-        lowShelf.LowShelf(sr, lsHz < fmax ? lsHz : fmax, lsDb);           lowShelf.Apply(ramp);
+        lowShelf.LowShelf(sr, lsHz < fmax ? lsHz : fmax, lsDb, lsK);      lowShelf.Apply(ramp);
+        double fd = DIP_RATIO * lsHz;
+        lowDip.Bell(sr, fd < fmax ? fd : fmax, dipDb, DIP_Q);             lowDip.Apply(ramp);
         highShelf.HighShelf(sr, hsHz < fmax ? hsHz : fmax, hsDb);         highShelf.Apply(ramp);
         tilt.Tilt(sr, 1000.0, tiltDb);
     }
@@ -876,6 +910,7 @@ void mi::Process(float *ps, int n)
             hr += (qr - hr) * slopeMix;
             double yl = xl + (hl - xl) * lcMix, yr = xr + (hr - xr) * lcMix;
             lowShelf.Run2(yl, yr);
+            lowDip.Run2(yl, yr);                      // unity while Low Dip is Off
             highShelf.Run2(yl, yr);
             yl = tilt.Run(0, yl);
             yr = tilt.Run(1, yr);
@@ -1104,6 +1139,11 @@ char const *mi::DescribeValue(int const param, int const value)
     case P_EQ: case P_COMP: case P_LIMITER: case P_BYPASS: case P_MATCH:
         return value ? "On" : "Off";
     case P_SLOPE:    return value ? "24 dB/oct" : "12 dB/oct";
+    case P_LOWSHAPE: return value ? "Vintage" : "Clean";
+    case P_LOWDIP:
+        if (value <= 0) return "Off";
+        snprintf(descBuf, sizeof(descBuf), "-%.1f dB", DipDb(value));
+        return descBuf;
     case P_DITHER:   { static char const *d[] = { "Off", "24-bit", "16-bit", "16-bit shaped" };
                        return (value >= 0 && value < 4) ? d[value] : NULL; }
     case P_INPUT:    return db(InputDb(value), "dB");
